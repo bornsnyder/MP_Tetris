@@ -96,6 +96,24 @@
     .toast.show { opacity: 1; }
 
     #mute-btn { position: absolute; top: 14px; right: 16px; z-index: 6; pointer-events: auto; padding: 8px 12px; font-size: 13px; }
+
+    /* touch controls (mobile) */
+    #touch-controls { position: absolute; inset: 0; z-index: 7; pointer-events: none; display: flex;
+      align-items: flex-end; justify-content: space-between; padding: 0 18px calc(18px + env(safe-area-inset-bottom)); }
+    #touch-controls.hidden { display: none; }
+    .tc-left, .tc-right { display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; }
+    .tc-left button, .tc-right button {
+      width: 64px; height: 64px; border-radius: 50%; font-size: 22px;
+      background: rgba(30, 40, 78, .5); border: 1px solid var(--border); color: var(--text);
+      -webkit-tap-highlight-color: transparent; touch-action: none; user-select: none;
+      display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+    }
+    .tc-left button:active, .tc-right button:active { background: rgba(60, 90, 170, .8); border-color: var(--accent); }
+    .tc-drop { width: 78px; height: 78px; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+    @media (max-width: 480px) {
+      .tc-left button, .tc-right button { width: 56px; height: 56px; font-size: 19px; }
+      .tc-drop { width: 68px; height: 68px; }
+    }
   </style>
 </head>
 <body>

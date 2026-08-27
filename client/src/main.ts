@@ -1,5 +1,6 @@
 // MP Tetris client entry: lobby -> countdown -> lockstep match -> end screen.
 import { Connection } from "./net/connection";
+import { TouchControls } from "./net/touch";
 import { sfx } from "./audio/sfx";
 import { Scene3D } from "./render/scene3d";
 import {
@@ -51,6 +52,7 @@ const G = {
   hashWindow: new Map<number, number>(), // tick -> own hash (recent)
   resyncPending: false,
   keysDown: new Set<string>(),
+  touch: null as TouchControls | null,
   lastCountShown: -1,
   prevCleared: [0, 0] as [number, number],
 };
@@ -176,10 +178,16 @@ function frame(now: number): void {
   while (sim.tick < targetTick && !sim.over) {
     fullRowsBefore = computeFullRows(sim);
     const t = sim.tick + 1; // entering tick t
-    const b0 = G.inTimelines[0].effectiveAt(t);
-    const b1 = G.inTimelines[1].effectiveAt(t);
+    const b0 = G.inTimelines[0].effectiveAt(t) | (G.youAre === 0 ? tapBits : 0);
+    const b1 = G.inTimelines[1].effectiveAt(t) | (G.youAre === 1 ? tapBits : 0);
     stepMatch(sim, [b0, b1]);
     sim.tick = t;
+    if (tapBits !== 0) { // consume the one-tick touch taps
+      const me = G.youAre;
+      G.inTimelines[me].setChange(t, tapBits);
+      G.conn.send({ t: "in", s: t, b: tapBits });
+      tapBits = 0;
+    }
 
     // send my input change if it differs from what I last sent for this tick
     const me = G.youAre;
@@ -447,6 +455,16 @@ function setupLobby(): void {
   if (m) el.codeInput.value = m[1].toUpperCase();
 }
 
+// ---------- Touch tap actions (rotate / hard drop) ----------
+// A discrete tap must last exactly one tick so rotation registers once and a hard
+// drop fires. We set the pending bits, sample them into the timeline this frame,
+// then clear them.
+let tapBits = 0;
+function handleTouchTap(bit: number): void {
+  if (G.phase !== "playing") return;
+  tapBits |= bit;
+}
+
 // ---------- Keyboard ----------
 window.addEventListener("keydown", (e) => {
   sfx.unlock();
@@ -477,6 +495,8 @@ function connectAndJoin(): void {
 
 function boot(): void {
   G.scene = new Scene3D(el.canvas);
+  G.touch = new TouchControls({ keysDown: G.keysDown, onTap: handleTouchTap });
+  G.touch.mount();
   setupLobby();
   connectAndJoin();
   G.conn.onOpen = () => {

@@ -7,16 +7,21 @@ import { PIECE_CELLS } from "../../../shared/game/pieces";
 export const PIECE_COLORS: number[] = [0x3ee6f0, 0xffcf3f, 0xc05ce8, 0x4ade80, 0xef4444, 0x3b82f6, 0xfb923c];
 const GARBAGE_COLOR = 0xb9c2d8;
 
+// Hero board occupies world x:[0,COLS], y:[0,VISIBLE_ROWS]. We frame it (plus a little
+// margin) so it is always fully visible and centered regardless of screen aspect.
+const HERO_W = COLS;
+const HERO_H = VISIBLE_ROWS;
+const MARGIN = 1.4; // world units of padding around the hero board
+
 interface BoardVisual {
   group: THREE.Group;
   cells: THREE.InstancedMesh;
   piece: THREE.Mesh[]; // 4 boxes for the active piece
   ghost: THREE.Mesh[];
   frame: THREE.LineSegments;
-  scale: number;
 }
 
-function makeBoard(scale: number, withShadow: boolean): BoardVisual {
+function makeBoard(withShadow: boolean): BoardVisual {
   const group = new THREE.Group();
   const geo = new THREE.BoxGeometry(0.94, 0.94, 0.94);
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.1 });
@@ -76,7 +81,7 @@ function makeBoard(scale: number, withShadow: boolean): BoardVisual {
     group.add(floor);
   }
 
-  return { group, cells, piece, ghost, frame, scale };
+  return { group, cells, piece, ghost, frame };
 }
 
 export class Scene3D {
@@ -97,33 +102,33 @@ export class Scene3D {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x0b0e1a);
-    this.scene.fog = new THREE.Fog(0x0b0e1a, 42, 90);
+    this.scene.fog = new THREE.Fog(0x0b0e1a, 60, 140);
 
-    this.camera = new THREE.PerspectiveCamera(46, 1, 0.1, 200);
-    this.camera.position.set(COLS / 2, VISIBLE_ROWS * 0.52 + 3.2, 27);
-    this.camera.lookAt(COLS / 2, VISIBLE_ROWS * 0.46, 0);
+    // Camera is repositioned every resize to fit the hero board in view.
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 300);
 
-    // lighting: key + fill + ambient
-    const amb = new THREE.AmbientLight(0x8899cc, 0.55);
+    // lighting: key + fill + ambient (framed around the hero board)
+    const amb = new THREE.AmbientLight(0x8899cc, 0.6);
     this.scene.add(amb);
     const key = new THREE.DirectionalLight(0xffffff, 1.35);
-    key.position.set(COLS / 2 + 14, VISIBLE_ROWS + 16, 18);
+    key.position.set(COLS / 2 + 14, VISIBLE_ROWS + 16, 22);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
-    key.shadow.camera.left = -16; key.shadow.camera.right = 16;
-    key.shadow.camera.top = 26; key.shadow.camera.bottom = -8;
+    key.shadow.camera.left = -18; key.shadow.camera.right = 18;
+    key.shadow.camera.top = 30; key.shadow.camera.bottom = -10;
     this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0x6ea8ff, 0.35);
-    fill.position.set(-10, 8, 14);
+    const fill = new THREE.DirectionalLight(0x6ea8ff, 0.4);
+    fill.position.set(-12, 10, 18);
     this.scene.add(fill);
 
-    // hero board (own) — centered
-    this.own = makeBoard(1, true);
+    // hero board (own) — centered at origin of its own group
+    this.own = makeBoard(true);
     this.own.group.position.set(0, 0, 0);
     this.scene.add(this.own.group);
 
     // opponent mini-board — upper right, angled toward center
-    this.opp = makeBoard(0.52, false);
+    this.opp = makeBoard(false);
+    this.opp.group.scale.setScalar(0.52);
     this.opp.group.position.set(COLS / 2 + 8.6, VISIBLE_ROWS * 0.74, -3);
     this.opp.group.rotation.y = -0.16;
     this.scene.add(this.opp.group);
@@ -132,14 +137,24 @@ export class Scene3D {
     this.resize();
   }
 
+  /** Fit the hero board (plus margin) into the viewport on any aspect ratio, centered. */
   resize(): void {
     const c = this.renderer.domElement;
     const w = c.clientWidth || window.innerWidth, h = c.clientHeight || window.innerHeight;
+    if (w === 0 || h === 0) return;
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    // keep the hero board framed on narrow screens
-    const fitDist = Math.max(27, (COLS * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360));
-    this.camera.position.z = fitDist;
+
+    const aspect = w / h;
+    const fovRad = (this.camera.fov * Math.PI) / 180;
+    // Distance needed so the board fits vertically and horizontally (take the larger).
+    const distV = (HERO_H + MARGIN * 2) / 2 / Math.tan(fovRad / 2);
+    const distH = (HERO_W + MARGIN * 2) / 2 / (Math.tan(fovRad / 2) * aspect);
+    const dist = Math.max(distV, distH);
+
+    this.camera.aspect = aspect;
+    // Look straight at the hero board's center so it sits dead-center on screen.
+    this.camera.position.set(COLS / 2, VISIBLE_ROWS / 2, dist);
+    this.camera.lookAt(COLS / 2, VISIBLE_ROWS / 2, 0);
     this.camera.updateProjectionMatrix();
   }
 
