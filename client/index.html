@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MP Tetris — Online 1v1</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='7' width='4' height='4' fill='%23c05ce8'/><rect x='5' y='7' width='4' height='4' fill='%23c05ce8'/><rect x='9' y='7' width='4' height='4' fill='%23c05ce8'/><rect x='5' y='3' width='4' height='4' fill='%23c05ce8'/></svg>" />
+  <style>
+    :root {
+      --bg: #0b0e1a;
+      --panel: rgba(20, 26, 46, 0.92);
+      --border: rgba(120, 140, 255, 0.25);
+      --text: #dfe4ff;
+      --dim: #8b93b8;
+      --accent: #6ea8ff;
+      --good: #4ade80;
+      --bad: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+    #app { position: relative; width: 100%; height: 100%; }
+    canvas#scene { position: absolute; inset: 0; display: block; }
+
+    .screen { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 10; }
+    .hidden { display: none !important; }
+
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      padding: 28px 32px; width: min(560px, 92vw); box-shadow: 0 20px 60px rgba(0,0,0,.5); backdrop-filter: blur(8px); }
+    h1 { font-size: 30px; letter-spacing: 4px; margin-bottom: 4px; }
+    h1 span { color: var(--accent); }
+    .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
+
+    label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--dim); margin: 14px 0 6px; }
+    input[type=text] { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: rgba(10, 13, 26, .8); color: var(--text); font-size: 15px; outline: none; }
+    input[type=text]:focus { border-color: var(--accent); }
+
+    button { cursor: pointer; border: 1px solid var(--border); background: rgba(40, 52, 96, .6); color: var(--text);
+      padding: 10px 18px; border-radius: 8px; font-size: 14px; transition: all .15s; }
+    button:hover { background: rgba(60, 78, 140, .8); border-color: var(--accent); }
+    button.primary { background: linear-gradient(135deg, #2f6fed, #6ea8ff); border: none; font-weight: 600; }
+    button.primary:hover { filter: brightness(1.15); }
+    button:disabled { opacity: .45; cursor: default; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+    .grow { flex: 1; }
+
+    /* lobby */
+    #lobby-roomcode { font-size: 42px; letter-spacing: 10px; text-align: center; color: var(--accent);
+      font-weight: 700; margin: 8px 0 2px; font-family: ui-monospace, monospace; }
+    .player-slot { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px;
+      border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; background: rgba(10,13,26,.5); }
+    .player-slot .status { font-size: 12px; color: var(--dim); }
+    .player-slot.ready .status { color: var(--good); }
+
+    /* highscore board */
+    #hs-board { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+    #hs-board h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: var(--dim); margin-bottom: 8px; }
+    table.hs { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.hs th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; font-size: 11px;
+      text-transform: uppercase; letter-spacing: 1px; }
+    table.hs td { padding: 5px 6px; border-top: 1px solid rgba(120,140,255,.1); }
+    table.hs .score { font-family: ui-monospace, monospace; color: var(--accent); text-align: right; }
+    table.hs .time { color: var(--dim); text-align: center; font-family: ui-monospace, monospace; }
+    table.hs .empty td { color: var(--dim); text-align: center; padding: 12px; }
+
+    /* in-game HUD */
+    #hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+    #scorebar { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 26px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 20px; }
+    #scorebar .who { font-size: 13px; color: var(--dim); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #scorebar .pts { font-family: ui-monospace, monospace; font-size: 20px; font-weight: 700; color: var(--accent); }
+    #scorebar .lines { font-size: 11px; color: var(--dim); }
+    #banner { position: absolute; top: 96px; left: 50%; transform: translateX(-50%); font-size: 26px; font-weight: 700;
+      letter-spacing: 2px; opacity: 0; transition: opacity .2s, transform .2s; text-shadow: 0 2px 18px rgba(110,168,255,.8); }
+    #banner.show { opacity: 1; transform: translateX(-50%) scale(1.06); }
+
+    /* countdown */
+    #countdown { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 8; pointer-events: none; }
+    #countdown .num { font-size: 120px; font-weight: 800; color: var(--accent); text-shadow: 0 0 60px rgba(110,168,255,.9); }
+
+    /* end screen */
+    #end-title { font-size: 34px; margin-bottom: 6px; }
+    #end-detail { color: var(--dim); margin-bottom: 18px; }
+    .final-scores { display: flex; gap: 14px; margin-bottom: 6px; }
+    .final-scores .fs { flex: 1; border: 1px solid var(--border); border-radius: 10px; padding: 12px; text-align: center; background: rgba(10,13,26,.5); }
+    .final-scores .fs.winner { border-color: var(--good); box-shadow: 0 0 24px rgba(74,222,128,.25) inset; }
+    .final-scores .name { font-size: 13px; color: var(--dim); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .final-scores .val { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; color: var(--accent); }
+
+    #conn-lost { position: absolute; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+      background: rgba(5,7,14,.85); backdrop-filter: blur(4px); }
+    .toast { position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%); background: var(--panel);
+      border: 1px solid var(--border); padding: 10px 18px; border-radius: 8px; font-size: 13px; z-index: 40; opacity: 0; transition: opacity .25s; }
+    .toast.show { opacity: 1; }
+
+    #mute-btn { position: absolute; top: 14px; right: 16px; z-index: 6; pointer-events: auto; padding: 8px 12px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene"></canvas>
+
+    <!-- Lobby -->
+    <div id="screen-lobby" class="screen">
+      <div class="card">
+        <h1>MP<span>TETRIS</span></h1>
+        <div class="subtitle">Online 1v1 — clear lines to bury your opponent</div>
+
+        <label>Your name</label>
+        <input id="name-input" type="text" maxlength="16" placeholder="Player" autocomplete="off" />
+
+        <div id="lobby-join">
+          <div class="row">
+            <button id="btn-create" class="primary grow">Create game</button>
+          </div>
+          <div class="row">
+            <input id="code-input" type="text" maxlength="4" placeholder="CODE" style="width:110px; text-transform:uppercase; letter-spacing:3px;" />
+            <button id="btn-join" class="grow">Join game</button>
+          </div>
+        </div>
+
+        <div id="lobby-room" class="hidden">
+          <label>Room code — share it or the link</label>
+          <div id="lobby-roomcode"></div>
+          <div class="row">
+            <button id="btn-copy-link" style="font-size:12px;">Copy invite link</button>
+          </div>
+          <div id="slot-0" class="player-slot"><span class="pname"></span><span class="status">waiting…</span></div>
+          <div id="slot-1" class="player-slot"><span class="pname"></span><span class="status">waiting…</span></div>
+          <div class="row">
+            <button id="btn-ready" class="primary grow">Ready up</button>
+            <button id="btn-leave-room">Leave</button>
+          </div>
+        </div>
+
+        <div id="hs-board">
+          <h3>Top rounds on this server</h3>
+          <table class="hs" id="hs-table"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- In-game HUD -->
+    <div id="hud" class="hidden">
+      <div id="scorebar">
+        <div><div class="who" id="you-name">You</div><div class="pts" id="you-score">0</div><div class="lines" id="you-lines">Lines 0 · Lvl 1</div></div>
+        <div style="width:1px; background:var(--border);"></div>
+        <div><div class="who" id="opp-name">Opponent</div><div class="pts" id="opp-score">0</div><div class="lines" id="opp-lines">Lines 0 · Lvl 1</div></div>
+      </div>
+      <div id="banner"></div>
+    </div>
+
+    <!-- Countdown -->
+    <div id="countdown" class="hidden"><div class="num">3</div></div>
+
+    <!-- End screen -->
+    <div id="screen-end" class="screen hidden">
+      <div class="card">
+        <div id="end-title"></div>
+        <div id="end-detail"></div>
+        <div class="final-scores">
+          <div class="fs" id="fs-0"><div class="name" id="fs-name-0"></div><div class="val" id="fs-val-0"></div></div>
+          <div class="fs" id="fs-1"><div class="name" id="fs-name-1"></div><div class="val" id="fs-val-1"></div></div>
+        </div>
+        <div id="hs-board-end">
+          <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin:16px 0 8px;">Top rounds</h3>
+          <table class="hs" id="hs-table-end"></table>
+        </div>
+        <div class="row">
+          <button id="btn-rematch" class="primary grow">Rematch (ready up)</button>
+          <button id="btn-exit">Leave room</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection lost -->
+    <div id="conn-lost" class="hidden">
+      <div class="card" style="text-align:center;">
+        <h1 style="font-size:22px; letter-spacing:1px;">Connection lost</h1>
+        <p style="color:var(--dim); margin:10px 0 18px;">The link to the server dropped.</p>
+        <div class="row" style="justify-content:center;">
+          <button id="btn-reconnect" class="primary">Reconnect</button>
+          <button id="btn-goto-lobby">Back to lobby</button>
+        </div>
+      </div>
+    </div>
+
+    <button id="mute-btn">🔊 Sound on</button>
+    <div id="toast" class="toast"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

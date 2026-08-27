@@ -1,0 +1,15 @@
+services:
+  mp-tetris:
+    build: .
+    container_name: mp-tetris
+    ports:
+      - "6000:6000"   # nginx reverse proxy forwards :80/:443 -> this port
+    environment:
+      PORT: "6000"
+      DATA_DIR: /app/data
+    volumes:
+      - mp-tetris-data:/app/data   # highscore board persistence
+    restart: always
+
+volumes:
+  mp-tetris-data:
