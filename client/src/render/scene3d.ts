@@ -126,10 +126,11 @@ export class Scene3D {
     this.own.group.position.set(0, 0, 0);
     this.scene.add(this.own.group);
 
-    // opponent mini-board — upper right, angled toward center
+    // opponent mini-board — right side, below the score bar so it never overlaps the HUD.
+    // (Repositioned in resize() to stay clear of the top on narrow screens.)
     this.opp = makeBoard(false);
     this.opp.group.scale.setScalar(0.52);
-    this.opp.group.position.set(COLS / 2 + 8.6, VISIBLE_ROWS * 0.74, -3);
+    this.opp.group.position.set(COLS / 2 + 8.6, VISIBLE_ROWS * 0.42, -3);
     this.opp.group.rotation.y = -0.16;
     this.scene.add(this.opp.group);
 
