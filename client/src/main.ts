@@ -4,7 +4,7 @@ import { TouchControls } from "./net/touch";
 import { sfx } from "./audio/sfx";
 import { Scene3D } from "./render/scene3d";
 import {
-  TICKS_PER_SEC, TICK_MS, COLS, VISIBLE_ROWS,
+  TICKS_PER_SEC, TICK_MS, COLS, VISIBLE_ROWS, BUFFER_TICKS,
   IN_LEFT, IN_RIGHT, IN_DOWN, IN_ROT_CW, IN_ROT_CCW, IN_HARD_DROP, IN_HOLD,
   type ServerMsg, type RoundRecord, type MatchSnapshot,
 } from "../../shared/protocol";
@@ -48,9 +48,11 @@ const G = {
   myReady: false,
   oppReady: false,
   inTimelines: [new InputTimeline(), new InputTimeline()] as [InputTimeline, InputTimeline],
+  lastLocalBits: 0,
   lastSentBits: 0,
   hashWindow: new Map<number, number>(), // tick -> own hash (recent)
   resyncPending: false,
+  mismatchStreak: 0, // consecutive hash mismatches before we trigger a resync
   keysDown: new Set<string>(),
   touch: null as TouchControls | null,
   lastCountShown: -1,
@@ -174,32 +176,49 @@ function frame(now: number): void {
 
   if (G.phase !== "playing") { G.scene.render(sim, 1 / 60); return; }
 
+  const me = G.youAre;
+
+  // Record the LOCAL player's live input. We sample once per frame and only record a
+  // timeline change when the sampled bits actually differ from what we last recorded —
+  // this makes recording idempotent across a catch-up burst (when rAF stalls and we
+  // advance many ticks in one frame), so a single key-press is NOT smeared across many
+  // ticks. Stamp it at `sim.tick + 1 - BUFFER_TICKS` so effectiveAt() applies it at
+  // sim.tick + 1 — the same instant the opponent's relayed copy of that press takes
+  // effect after their buffer.
+  const myInput = sampleBits() | tapBits;
+  if (myInput !== G.lastLocalBits || tapBits !== 0) {
+    G.inTimelines[me].setChange(sim.tick + 1 - BUFFER_TICKS, myInput);
+    G.lastLocalBits = myInput;
+    if (tapBits !== 0) { // consume one-tick touch taps after they've been recorded
+      G.conn.send({ t: "in", s: sim.tick + 1 - BUFFER_TICKS, b: tapBits });
+      tapBits = 0;
+    }
+  }
+
   const targetTick = Math.floor((Date.now() - G.startAt) / TICK_MS);
   while (sim.tick < targetTick && !sim.over) {
     fullRowsBefore = computeFullRows(sim);
     const t = sim.tick + 1; // entering tick t
-    const b0 = G.inTimelines[0].effectiveAt(t) | (G.youAre === 0 ? tapBits : 0);
-    const b1 = G.inTimelines[1].effectiveAt(t) | (G.youAre === 1 ? tapBits : 0);
+
+    // Each player's bits come from their own timeline: the local player's is fed by
+    // live input sampling above; the opponent's is fed by relayed "in" messages.
+    const b0 = G.inTimelines[0].effectiveAt(t);
+    const b1 = G.inTimelines[1].effectiveAt(t);
     stepMatch(sim, [b0, b1]);
     sim.tick = t;
-    if (tapBits !== 0) { // consume the one-tick touch taps
-      const me = G.youAre;
-      G.inTimelines[me].setChange(t, tapBits);
-      G.conn.send({ t: "in", s: t, b: tapBits });
-      tapBits = 0;
-    }
 
     // send my input change if it differs from what I last sent for this tick
-    const me = G.youAre;
     const myBits = me === 0 ? b0 : b1;
     if (myBits !== G.lastSentBits) {
-      G.inTimelines[me].setChange(t, myBits);
       G.conn.send({ t: "in", s: t, b: myBits });
       G.lastSentBits = myBits;
     }
 
-    // periodic lockstep hash (every 30 ticks)
-    if (t % 30 === 0) {
+    // periodic lockstep hash (every 30 ticks). We skip the first few checks: right
+    // after "GO!" the two clients' clocks can be off by a tick or two (rAF start
+    // jitter), and verifying that early would trigger a spurious resync. By ~1s in,
+    // both are locked to wall time and any real divergence is meaningful.
+    if (t % 30 === 0 && t >= 90) {
       const h = hashState(sim);
       G.hashWindow.set(t, h);
       if (G.hashWindow.size > 40) {
@@ -234,8 +253,8 @@ function frame(now: number): void {
     }
   }
 
-  // update HUD
-  const me = G.youAre, them = (1 - G.youAre) as 0 | 1;
+  // update HUD (`me` is already in scope from the input sampling above)
+  const them = (1 - me) as 0 | 1;
   el.youScore.textContent = fmt(sim.players[me].score);
   el.oppScore.textContent = fmt(sim.players[them].score);
   el.youLines.textContent = `Lines ${sim.players[me].lines} · Lvl ${sim.players[me].level}`;
@@ -292,12 +311,18 @@ function onServerMsg(msg: ServerMsg): void {
     case "start": {
       G.matchId = msg.matchId;
       G.seed = msg.seed;
-      G.startAt = msg.startAt;
+      // Align our tick clock to the server's reference time. Both clients receive
+      // `start` within a few ms of each other, so using Date.now() as the shared
+      // origin keeps their sim ticks aligned — otherwise rAF start jitter leaves one
+      // client ~a buffer ahead and desyncs local input timing.
+      G.startAt = Math.max(msg.startAt, Date.now());
       G.youAre = msg.youAre;
       G.sim = createMatch(msg.seed);
       G.inTimelines[0].reset();
       G.inTimelines[1].reset();
+      G.lastLocalBits = 0;
       G.lastSentBits = 0;
+      G.mismatchStreak = 0;
       G.hashWindow.clear();
       G.prevCleared = [0, 0];
       G.phase = "countdown";
@@ -320,7 +345,14 @@ function onServerMsg(msg: ServerMsg): void {
     case "hash": {
       if (!G.sim) return;
       const mine = G.hashWindow.get(msg.tick);
-      if (mine !== undefined && mine !== msg.h && !G.resyncPending) {
+      if (mine === undefined) { G.mismatchStreak = 0; break; }
+      // A single mismatch can be a transient clock offset (rAF start jitter, or one
+      // client briefly running ahead). Only resync after several CONSECUTIVE mismatches
+      // so a small offset self-corrects instead of triggering a spurious full-state
+      // adopt. A genuine divergence keeps mismatching and will trip this threshold.
+      if (mine === msg.h) { G.mismatchStreak = 0; break; }
+      G.mismatchStreak++;
+      if (G.mismatchStreak >= 3 && !G.resyncPending) {
         G.resyncPending = true;
         G.conn.send({ t: "resync", state: JSON.stringify(snapshot(G.sim)) });
         toast("Resyncing…");
@@ -345,6 +377,7 @@ function onServerMsg(msg: ServerMsg): void {
         el.countdown.classList.add("hidden");
       }
       G.resyncPending = false;
+      G.mismatchStreak = 0;
       toast("Resynced");
       break;
     }
@@ -466,11 +499,15 @@ function handleTouchTap(bit: number): void {
 }
 
 // ---------- Keyboard ----------
+// Register held keys even during the countdown so a key already pressed at
+// "GO!" is captured on the very first tick (otherwise the opening piece can't be
+// moved until the next fresh keypress). sampleBits() only reads these bits once
+// phase === "playing", so this is safe.
 window.addEventListener("keydown", (e) => {
   sfx.unlock();
   const tag = (document.activeElement?.tagName ?? "").toLowerCase();
   if (tag === "input" || tag === "textarea") return; // typing in a field
-  if (G.phase !== "playing") return;
+  if (G.phase !== "playing" && G.phase !== "countdown") return;
   if (e.code === "KeyP" || e.code === "Escape") { togglePause(); return; }
   const bit = KEY_MAP[e.code];
   if (!bit) return;

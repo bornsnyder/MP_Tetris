@@ -138,7 +138,13 @@ export class Scene3D {
     this.resize();
   }
 
-  /** Fit the hero board (plus margin) into the viewport on any aspect ratio, centered. */
+  /** Fit the hero board into the viewport on any aspect ratio, centered.
+   *
+   * We fit by HEIGHT first: a Tetris field is tall (10x20), so on portrait phones
+   * fitting by width would make it fill the screen and push most rows off-screen,
+   * leaving only empty top rows visible. Fitting by height keeps the whole board —
+   * including any stacked bricks at the bottom — in view; on wide screens we then
+   * widen the field of view so the full 10 columns still fit horizontally. */
   resize(): void {
     const c = this.renderer.domElement;
     const w = c.clientWidth || window.innerWidth, h = c.clientHeight || window.innerHeight;
@@ -146,10 +152,16 @@ export class Scene3D {
     this.renderer.setSize(w, h, false);
 
     const aspect = w / h;
-    const fovRad = (this.camera.fov * Math.PI) / 180;
-    // Distance needed so the board fits vertically and horizontally (take the larger).
-    const distV = (HERO_H + MARGIN * 2) / 2 / Math.tan(fovRad / 2);
-    const distH = (HERO_W + MARGIN * 2) / 2 / (Math.tan(fovRad / 2) * aspect);
+    // Vertical FOV needed to fit the board's height in view.
+    let fov = 2 * Math.atan((HERO_H + MARGIN * 2) / 2 / (this.camera.position.z || 1)) * (180 / Math.PI);
+    // Widen the field of view so all columns also fit horizontally on wide screens
+    // (on narrow/portrait this is already satisfied, so fov stays at its minimum).
+    const minFovForWidth = 2 * Math.atan((HERO_W + MARGIN * 2) / 2 / ((this.camera.position.z || 1) * aspect)) * (180 / Math.PI);
+    if (minFovForWidth > fov) fov = minFovForWidth;
+    this.camera.fov = fov;
+
+    const distV = (HERO_H + MARGIN * 2) / 2 / Math.tan((this.camera.fov * Math.PI) / 180 / 2);
+    const distH = (HERO_W + MARGIN * 2) / 2 / (Math.tan((this.camera.fov * Math.PI) / 180 / 2) * aspect);
     const dist = Math.max(distV, distH);
 
     this.camera.aspect = aspect;
