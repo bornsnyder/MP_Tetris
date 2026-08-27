@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 
+// Root is passed via CLI (`vite build client` / `vite client`), so no `root` here.
 export default defineConfig({
-  root: __dirname,
   base: "/",
   build: {
     outDir: "../dist-client",
