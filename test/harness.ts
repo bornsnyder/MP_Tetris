@@ -2,6 +2,7 @@
 // clients over WebSocket, plays full matches, and checks lockstep integrity,
 // garbage exchange, top-out termination, and highscore recording.
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket from "ws";
 import { createMatch, stepMatch, hashState, snapshot } from "../shared/game/engine.js";
@@ -16,6 +17,16 @@ let failures = 0;
 function check(cond: boolean, label: string): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ FAIL: ${label}`); }
+}
+
+// Use node:http instead of global fetch for health checks: on Windows, Node's
+// undici-based fetch leaves pooled handles open at process.exit(), which trips a
+// libuv assertion that masks the harness exit code.
+function httpGet(url: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+    req.on("error", reject);
+  });
 }
 
 // ---------- scripted bot ----------
@@ -75,32 +86,39 @@ class Bot {
   /** Advance simulation to wall-clock now (like the browser client does). */
   tick(): void {
     if (!this.sim || Date.now() < this.startAt) return;
-    const target = Math.floor((Date.now() - this.startAt) / TICK_MS);
+    const now = Date.now();
+
+    // Sample scripted input ONCE per frame, exactly like main.ts samples keys:
+    // record + relay immediately, stamped at max(sim.tick, wallTick) so the change
+    // takes effect BUFFER_TICKS after "now" on both clients.
+    const me = this.youAre;
+    let bits = 0;
+    const a = this.sim.players[me].active;
+    if (a && !this.sim.over) {
+      const t = this.sim.tick + 1;
+      const targetX = COLS / 2 - 1 + Math.floor(Math.sin(t / 40) * 3);
+      if (a.x < targetX) bits |= IN_LEFT;
+      else if (a.x > targetX) bits |= IN_RIGHT;
+      if (t % 97 === 0) bits |= IN_ROT_CW;
+      // hard drop every ~2.5s to force line pressure eventually
+      const grounded = this.sim.players[me].grounded;
+      if (grounded || t % 150 < 3) bits |= IN_HARD_DROP;
+    }
+    if (bits !== this.lastSent) {
+      const wallTick = Math.floor((now - this.startAt) / TICK_MS);
+      const stamp = Math.max(this.sim.tick, wallTick);
+      this.timelines[me].setChange(stamp, bits);
+      this.ws.send(JSON.stringify({ t: "in", s: stamp, b: bits }));
+      this.lastSent = bits;
+    }
+
+    const target = Math.floor((now - this.startAt) / TICK_MS);
     while (this.sim.tick < target && !this.sim.over) {
       const t = this.sim.tick + 1;
       const b0 = this.timelines[0].effectiveAt(t);
       const b1 = this.timelines[1].effectiveAt(t);
       stepMatch(this.sim, [b0, b1]);
       this.sim.tick = t;
-
-      // scripted inputs: move toward center, rotate occasionally, hard drop when grounded-ish
-      const me = this.youAre;
-      let bits = 0;
-      const a = this.sim.players[me].active;
-      if (a) {
-        const targetX = COLS / 2 - 1 + Math.floor(Math.sin(t / 40) * 3);
-        if (a.x < targetX) bits |= IN_LEFT;
-        else if (a.x > targetX) bits |= IN_RIGHT;
-        if (t % 97 === 0) bits |= IN_ROT_CW;
-        // hard drop every ~2.5s to force line pressure eventually
-        const grounded = this.sim.players[me].grounded;
-        if (grounded || t % 150 < 3) bits |= IN_HARD_DROP;
-      }
-      if (bits !== this.lastSent) {
-        this.timelines[me].setChange(t, bits);
-        this.ws.send(JSON.stringify({ t: "in", s: t, b: bits }));
-        this.lastSent = bits;
-      }
 
       if (t % 30 === 0) {
         const h = hashState(this.sim);
@@ -139,8 +157,7 @@ async function main() {
   for (let i = 0; i < 50 && !up; i++) {
     await sleep(200);
     try {
-      const r = await fetch(`${BASE}/healthz`);
-      up = r.ok;
+      up = (await httpGet(`${BASE}/healthz`)) === 200;
     } catch { /* not yet */ }
   }
   if (!up) { console.error("Server failed to start:\n" + srvOut); process.exit(1); }
@@ -186,8 +203,7 @@ async function main() {
     // --- Test 4: highscore recorded server-side ---
     console.log("[Test 4] Highscore board");
     await sleep(300);
-    const r = await fetch(`${BASE}/healthz`); // ensure server alive
-    check(r.ok, "server still healthy after match");
+    check((await httpGet(`${BASE}/healthz`)) === 200, "server still healthy after match");
 
     // verify scores.json on disk (DATA_DIR is /tmp/mp-tetris-test-data)
     const { readFileSync } = await import("node:fs");
@@ -231,8 +247,15 @@ async function main() {
     check(fullBottom, "opponent's bottom row is a complete solid garbage row");
 
     console.log("\n" + (failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`));
-  } finally {
+
+    // Clean shutdown: close the client sockets and wait for the server child to
+    // exit so no handles are left open. Exiting with dangling handles trips a libuv
+    // assertion on Windows that masks the real exit code.
+    a.ws.close(); b.ws.close();
     srv.kill("SIGTERM");
+    await new Promise<void>((resolve) => { srv.once("exit", () => resolve()); });
+  } finally {
+    if (!srv.killed) srv.kill("SIGTERM"); // safety net on early failure
   }
   process.exit(failures === 0 ? 0 : 1);
 }

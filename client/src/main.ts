@@ -49,7 +49,6 @@ const G = {
   oppReady: false,
   inTimelines: [new InputTimeline(), new InputTimeline()] as [InputTimeline, InputTimeline],
   lastLocalBits: 0,
-  lastSentBits: 0,
   hashWindow: new Map<number, number>(), // tick -> own hash (recent)
   resyncPending: false,
   mismatchStreak: 0, // consecutive hash mismatches before we trigger a resync
@@ -182,21 +181,27 @@ function frame(now: number): void {
   // timeline change when the sampled bits actually differ from what we last recorded —
   // this makes recording idempotent across a catch-up burst (when rAF stalls and we
   // advance many ticks in one frame), so a single key-press is NOT smeared across many
-  // ticks. Stamp it at `sim.tick + 1 - BUFFER_TICKS` so effectiveAt() applies it at
-  // sim.tick + 1 — the same instant the opponent's relayed copy of that press takes
-  // effect after their buffer.
+  // ticks. The change is stamped at max(sim.tick, wallTick) and relayed IMMEDIATELY:
+  // effectiveAt() then applies it BUFFER_TICKS later on this client, and the opponent
+  // (who receives the same stamp) applies it at exactly the same tick — the buffer
+  // guarantees their copy of the message arrives before that tick is reached. Stamping
+  // earlier would desync: the peer may already have stepped past that tick (or, after an
+  // rAF stall, we'd apply the change retroactively while they can't rewind).
   const myInput = sampleBits() | tapBits;
-  if (myInput !== G.lastLocalBits || tapBits !== 0) {
-    G.inTimelines[me].setChange(sim.tick + 1 - BUFFER_TICKS, myInput);
+  if (myInput !== G.lastLocalBits) {
+    const wallTick = Math.floor((Date.now() - G.startAt) / TICK_MS);
+    const stamp = Math.max(sim.tick, wallTick);
+    G.inTimelines[me].setChange(stamp, myInput);
+    G.conn.send({ t: "in", s: stamp, b: myInput });
     G.lastLocalBits = myInput;
-    if (tapBits !== 0) { // consume one-tick touch taps after they've been recorded
-      G.conn.send({ t: "in", s: sim.tick + 1 - BUFFER_TICKS, b: tapBits });
-      tapBits = 0;
-    }
   }
+  tapBits = 0; // taps were sampled into the timeline above (or are irrelevant this frame)
 
+  // While paused, freeze local stepping; the wall clock keeps advancing and we
+  // catch up in one burst on unpause (input stamps use max(sim.tick, wallTick),
+  // so the catch-up stays consistent with the peer).
   const targetTick = Math.floor((Date.now() - G.startAt) / TICK_MS);
-  while (sim.tick < targetTick && !sim.over) {
+  while (!paused && sim.tick < targetTick && !sim.over) {
     fullRowsBefore = computeFullRows(sim);
     const t = sim.tick + 1; // entering tick t
 
@@ -206,13 +211,6 @@ function frame(now: number): void {
     const b1 = G.inTimelines[1].effectiveAt(t);
     stepMatch(sim, [b0, b1]);
     sim.tick = t;
-
-    // send my input change if it differs from what I last sent for this tick
-    const myBits = me === 0 ? b0 : b1;
-    if (myBits !== G.lastSentBits) {
-      G.conn.send({ t: "in", s: t, b: myBits });
-      G.lastSentBits = myBits;
-    }
 
     // periodic lockstep hash (every 30 ticks). We skip the first few checks: right
     // after "GO!" the two clients' clocks can be off by a tick or two (rAF start
@@ -321,7 +319,8 @@ function onServerMsg(msg: ServerMsg): void {
       G.inTimelines[0].reset();
       G.inTimelines[1].reset();
       G.lastLocalBits = 0;
-      G.lastSentBits = 0;
+      tapBits = 0;
+      paused = false; // a new match starts unpaused
       G.mismatchStreak = 0;
       G.hashWindow.clear();
       G.prevCleared = [0, 0];
